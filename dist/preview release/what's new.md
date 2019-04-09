@@ -159,10 +159,12 @@
   - Loaded bones are linked with the transform node created for the corresponding glTF node
 - Improve load performance by blocking material dirtying during load ([bghgary](https://github.com/bghgary))
 - Added animation group target override to support custom animation targets ([MackeyK24](https://github.com/mackeyk24))
+- Added loadMeshPrimitiveAsync extension support ([MackeyK24](https://github.com/mackeyk24))
 
 ### glTF Serializer
 
 - Added support for exporting `KHR_lights_punctual`
+- Exporting a glTF from a Babylon scene with right-handed coordinate system should no longer cause the mesh normals to flip.([Nicholas Barlow](https://github.com/drigax))
 
 ### Post-Processes Library
 - Added the [Ocean](https://doc.babylonjs.com/extensions/oceanpostprocess) post-process ([julien-moreau](https://github.com/julien-moreau))

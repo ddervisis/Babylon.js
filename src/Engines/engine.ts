@@ -16,7 +16,6 @@ import { Material } from "../Materials/material";
 import { IInternalTextureLoader } from "../Materials/Textures/internalTextureLoader";
 import { InternalTexture } from "../Materials/Textures/internalTexture";
 import { BaseTexture } from "../Materials/Textures/baseTexture";
-import { IMultiRenderTargetOptions } from "../Materials/Textures/multiRenderTarget";
 import { _TimeToken } from "../Instrumentation/timeToken";
 import { IAudioEngine } from "../Audio/audioEngine";
 import { IOfflineProvider } from "../Offline/IOfflineProvider";
@@ -29,6 +28,10 @@ import { EngineStore } from "./engineStore";
 import { RenderTargetCreationOptions } from "../Materials/Textures/renderTargetCreationOptions";
 import { _DevTools } from '../Misc/devTools';
 import { WebRequest } from '../Misc/webRequest';
+import { WebGLPipelineContext } from './WebGL/webGLPipelineContext';
+import { IPipelineContext } from './IPipelineContext';
+import { DataBuffer } from '../Meshes/dataBuffer';
+import { WebGLDataBuffer } from '../Meshes/WebGL/webGLDataBuffer';
 
 declare type PostProcess = import("../PostProcesses/postProcess").PostProcess;
 declare type Texture = import("../Materials/Textures/texture").Texture;
@@ -885,22 +888,24 @@ export class Engine {
     /** @hidden */
     protected _cachedVertexBuffers: any;
     /** @hidden */
-    protected _cachedIndexBuffer: Nullable<WebGLBuffer>;
+    protected _cachedIndexBuffer: Nullable<DataBuffer>;
     /** @hidden */
     protected _cachedEffectForVertexBuffers: Nullable<Effect>;
     /** @hidden */
-    protected _currentRenderTarget: Nullable<InternalTexture>;
+    public _currentRenderTarget: Nullable<InternalTexture>;
     private _uintIndicesCurrentlySet = false;
     private _currentBoundBuffer = new Array<Nullable<WebGLBuffer>>();
     /** @hidden */
     protected _currentFramebuffer: Nullable<WebGLFramebuffer> = null;
     private _currentBufferPointers = new Array<BufferPointer>();
     private _currentInstanceLocations = new Array<number>();
-    private _currentInstanceBuffers = new Array<WebGLBuffer>();
+    private _currentInstanceBuffers = new Array<DataBuffer>();
     private _textureUnits: Int32Array;
 
-    private _workingCanvas: Nullable<HTMLCanvasElement>;
-    private _workingContext: Nullable<CanvasRenderingContext2D>;
+    /** @hidden */
+    public _workingCanvas: Nullable<HTMLCanvasElement>;
+    /** @hidden */
+    public _workingContext: Nullable<CanvasRenderingContext2D>;
     private _rescalePostProcess: PostProcess;
 
     private _dummyFramebuffer: WebGLFramebuffer;
@@ -925,7 +930,8 @@ export class Engine {
 
     // Hardware supported Compressed Textures
     private _texturesSupported = new Array<string>();
-    private _textureFormatInUse: Nullable<string>;
+    /** @hidden */
+    public _textureFormatInUse: Nullable<string>;
 
     /**
      * Gets the list of texture formats supported
@@ -1567,7 +1573,8 @@ export class Engine {
         return this._isStencilEnable;
     }
 
-    private _prepareWorkingCanvas(): void {
+    /** @hidden */
+    public _prepareWorkingCanvas(): void {
         if (this._workingCanvas) {
             return;
         }
@@ -2404,7 +2411,7 @@ export class Engine {
             this.unBindFramebuffer(this._currentRenderTarget);
         }
         this._currentRenderTarget = texture;
-        this.bindUnboundFramebuffer(texture._MSAAFramebuffer ? texture._MSAAFramebuffer : texture._framebuffer);
+        this._bindUnboundFramebuffer(texture._MSAAFramebuffer ? texture._MSAAFramebuffer : texture._framebuffer);
         var gl = this._gl;
         if (texture.isCube) {
             if (faceIndex === undefined) {
@@ -2444,7 +2451,8 @@ export class Engine {
         this.wipeCaches();
     }
 
-    private bindUnboundFramebuffer(framebuffer: Nullable<WebGLFramebuffer>) {
+    /** @hidden */
+    public _bindUnboundFramebuffer(framebuffer: Nullable<WebGLFramebuffer>) {
         if (this._currentFramebuffer !== framebuffer) {
             this._gl.bindFramebuffer(this._gl.FRAMEBUFFER, framebuffer);
             this._currentFramebuffer = framebuffer;
@@ -2480,76 +2488,12 @@ export class Engine {
         if (onBeforeUnbind) {
             if (texture._MSAAFramebuffer) {
                 // Bind the correct framebuffer
-                this.bindUnboundFramebuffer(texture._framebuffer);
+                this._bindUnboundFramebuffer(texture._framebuffer);
             }
             onBeforeUnbind();
         }
 
-        this.bindUnboundFramebuffer(null);
-    }
-
-    /**
-     * Unbind a list of render target textures from the webGL context
-     * This is used only when drawBuffer extension or webGL2 are active
-     * @param textures defines the render target textures to unbind
-     * @param disableGenerateMipMaps defines a boolean indicating that mipmaps must not be generated
-     * @param onBeforeUnbind defines a function which will be called before the effective unbind
-     */
-    public unBindMultiColorAttachmentFramebuffer(textures: InternalTexture[], disableGenerateMipMaps = false, onBeforeUnbind?: () => void): void {
-        this._currentRenderTarget = null;
-
-        // If MSAA, we need to bitblt back to main texture
-        var gl = this._gl;
-
-        if (textures[0]._MSAAFramebuffer) {
-            gl.bindFramebuffer(gl.READ_FRAMEBUFFER, textures[0]._MSAAFramebuffer);
-            gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, textures[0]._framebuffer);
-
-            var attachments = textures[0]._attachments;
-            if (!attachments) {
-                attachments = new Array(textures.length);
-                textures[0]._attachments = attachments;
-            }
-
-            for (var i = 0; i < textures.length; i++) {
-                var texture = textures[i];
-
-                for (var j = 0; j < attachments.length; j++) {
-                    attachments[j] = gl.NONE;
-                }
-
-                attachments[i] = (<any>gl)[this.webGLVersion > 1 ? "COLOR_ATTACHMENT" + i : "COLOR_ATTACHMENT" + i + "_WEBGL"];
-                gl.readBuffer(attachments[i]);
-                gl.drawBuffers(attachments);
-                gl.blitFramebuffer(0, 0, texture.width, texture.height,
-                    0, 0, texture.width, texture.height,
-                    gl.COLOR_BUFFER_BIT, gl.NEAREST);
-
-            }
-            for (var i = 0; i < attachments.length; i++) {
-                attachments[i] = (<any>gl)[this.webGLVersion > 1 ? "COLOR_ATTACHMENT" + i : "COLOR_ATTACHMENT" + i + "_WEBGL"];
-            }
-            gl.drawBuffers(attachments);
-        }
-
-        for (var i = 0; i < textures.length; i++) {
-            var texture = textures[i];
-            if (texture.generateMipMaps && !disableGenerateMipMaps && !texture.isCube) {
-                this._bindTextureDirectly(gl.TEXTURE_2D, texture);
-                gl.generateMipmap(gl.TEXTURE_2D);
-                this._bindTextureDirectly(gl.TEXTURE_2D, null);
-            }
-        }
-
-        if (onBeforeUnbind) {
-            if (textures[0]._MSAAFramebuffer) {
-                // Bind the correct framebuffer
-                this.bindUnboundFramebuffer(textures[0]._framebuffer);
-            }
-            onBeforeUnbind();
-        }
-
-        this.bindUnboundFramebuffer(null);
+        this._bindUnboundFramebuffer(null);
     }
 
     /**
@@ -2579,7 +2523,7 @@ export class Engine {
         if (this._currentRenderTarget) {
             this.unBindFramebuffer(this._currentRenderTarget);
         } else {
-            this.bindUnboundFramebuffer(null);
+            this._bindUnboundFramebuffer(null);
         }
         if (this._cachedViewport) {
             this.setViewport(this._cachedViewport);
@@ -2596,14 +2540,15 @@ export class Engine {
      * @param elements defines the content of the uniform buffer
      * @returns the webGL uniform buffer
      */
-    public createUniformBuffer(elements: FloatArray): WebGLBuffer {
+    public createUniformBuffer(elements: FloatArray): DataBuffer {
         var ubo = this._gl.createBuffer();
 
         if (!ubo) {
             throw new Error("Unable to create uniform buffer");
         }
+        let result = new WebGLDataBuffer(ubo);
 
-        this.bindUniformBuffer(ubo);
+        this.bindUniformBuffer(result);
 
         if (elements instanceof Float32Array) {
             this._gl.bufferData(this._gl.UNIFORM_BUFFER, <Float32Array>elements, this._gl.STATIC_DRAW);
@@ -2613,8 +2558,8 @@ export class Engine {
 
         this.bindUniformBuffer(null);
 
-        ubo.references = 1;
-        return ubo;
+        result.references = 1;
+        return result;
     }
 
     /**
@@ -2623,14 +2568,15 @@ export class Engine {
      * @param elements defines the content of the uniform buffer
      * @returns the webGL uniform buffer
      */
-    public createDynamicUniformBuffer(elements: FloatArray): WebGLBuffer {
+    public createDynamicUniformBuffer(elements: FloatArray): DataBuffer {
         var ubo = this._gl.createBuffer();
 
         if (!ubo) {
             throw new Error("Unable to create dynamic uniform buffer");
         }
 
-        this.bindUniformBuffer(ubo);
+        let result = new WebGLDataBuffer(ubo);
+        this.bindUniformBuffer(result);
 
         if (elements instanceof Float32Array) {
             this._gl.bufferData(this._gl.UNIFORM_BUFFER, <Float32Array>elements, this._gl.DYNAMIC_DRAW);
@@ -2640,8 +2586,8 @@ export class Engine {
 
         this.bindUniformBuffer(null);
 
-        ubo.references = 1;
-        return ubo;
+        result.references = 1;
+        return result;
     }
 
     /**
@@ -2652,7 +2598,7 @@ export class Engine {
      * @param offset defines the offset in the uniform buffer where update should start
      * @param count defines the size of the data to update
      */
-    public updateUniformBuffer(uniformBuffer: WebGLBuffer, elements: FloatArray, offset?: number, count?: number): void {
+    public updateUniformBuffer(uniformBuffer: DataBuffer, elements: FloatArray, offset?: number, count?: number): void {
         this.bindUniformBuffer(uniformBuffer);
 
         if (offset === undefined) {
@@ -2687,14 +2633,15 @@ export class Engine {
      * @param data the data for the vertex buffer
      * @returns the new WebGL static buffer
      */
-    public createVertexBuffer(data: DataArray): WebGLBuffer {
+    public createVertexBuffer(data: DataArray): DataBuffer {
         var vbo = this._gl.createBuffer();
 
         if (!vbo) {
             throw new Error("Unable to create vertex buffer");
         }
 
-        this.bindArrayBuffer(vbo);
+        let dataBuffer = new WebGLDataBuffer(vbo);
+        this.bindArrayBuffer(dataBuffer);
 
         if (data instanceof Array) {
             this._gl.bufferData(this._gl.ARRAY_BUFFER, new Float32Array(data), this._gl.STATIC_DRAW);
@@ -2703,8 +2650,9 @@ export class Engine {
         }
 
         this._resetVertexBufferBinding();
-        vbo.references = 1;
-        return vbo;
+
+        dataBuffer.references = 1;
+        return dataBuffer;
     }
 
     /**
@@ -2712,14 +2660,15 @@ export class Engine {
      * @param data the data for the dynamic vertex buffer
      * @returns the new WebGL dynamic buffer
      */
-    public createDynamicVertexBuffer(data: DataArray): WebGLBuffer {
+    public createDynamicVertexBuffer(data: DataArray): DataBuffer {
         var vbo = this._gl.createBuffer();
 
         if (!vbo) {
             throw new Error("Unable to create dynamic vertex buffer");
         }
 
-        this.bindArrayBuffer(vbo);
+        let result = new WebGLDataBuffer(vbo);
+        this.bindArrayBuffer(result);
 
         if (data instanceof Array) {
             this._gl.bufferData(this._gl.ARRAY_BUFFER, new Float32Array(data), this._gl.DYNAMIC_DRAW);
@@ -2728,8 +2677,8 @@ export class Engine {
         }
 
         this._resetVertexBufferBinding();
-        vbo.references = 1;
-        return vbo;
+        result.references = 1;
+        return result;
     }
 
     /**
@@ -2738,7 +2687,7 @@ export class Engine {
      * @param indices defines the data to update
      * @param offset defines the offset in the target index buffer where update should start
      */
-    public updateDynamicIndexBuffer(indexBuffer: WebGLBuffer, indices: IndicesArray, offset: number = 0): void {
+    public updateDynamicIndexBuffer(indexBuffer: DataBuffer, indices: IndicesArray, offset: number = 0): void {
         // Force cache update
         this._currentBoundBuffer[this._gl.ELEMENT_ARRAY_BUFFER] = null;
         this.bindIndexBuffer(indexBuffer);
@@ -2762,7 +2711,7 @@ export class Engine {
      * @param byteOffset the byte offset of the data
      * @param byteLength the byte length of the data
      */
-    public updateDynamicVertexBuffer(vertexBuffer: WebGLBuffer, data: DataArray, byteOffset?: number, byteLength?: number): void {
+    public updateDynamicVertexBuffer(vertexBuffer: DataBuffer, data: DataArray, byteOffset?: number, byteLength?: number): void {
         this.bindArrayBuffer(vertexBuffer);
 
         if (byteOffset === undefined) {
@@ -2807,14 +2756,15 @@ export class Engine {
      * @param updatable defines if the index buffer must be updatable
      * @returns a new webGL buffer
      */
-    public createIndexBuffer(indices: IndicesArray, updatable?: boolean): WebGLBuffer {
+    public createIndexBuffer(indices: IndicesArray, updatable?: boolean): DataBuffer {
         var vbo = this._gl.createBuffer();
+        let dataBuffer = new WebGLDataBuffer(vbo!);
 
         if (!vbo) {
             throw new Error("Unable to create index buffer");
         }
 
-        this.bindIndexBuffer(vbo);
+        this.bindIndexBuffer(dataBuffer);
 
         // Check for 32 bits indices
         var arrayBuffer;
@@ -2847,16 +2797,16 @@ export class Engine {
 
         this._gl.bufferData(this._gl.ELEMENT_ARRAY_BUFFER, arrayBuffer, updatable ? this._gl.DYNAMIC_DRAW : this._gl.STATIC_DRAW);
         this._resetIndexBufferBinding();
-        vbo.references = 1;
-        vbo.is32Bits = need32Bits;
-        return vbo;
+        dataBuffer.references = 1;
+        dataBuffer.is32Bits = need32Bits;
+        return dataBuffer;
     }
 
     /**
      * Bind a webGL buffer to the webGL context
      * @param buffer defines the buffer to bind
      */
-    public bindArrayBuffer(buffer: Nullable<WebGLBuffer>): void {
+    public bindArrayBuffer(buffer: Nullable<DataBuffer>): void {
         if (!this._vaoRecordInProgress) {
             this._unbindVertexArrayObject();
         }
@@ -2867,8 +2817,8 @@ export class Engine {
      * Bind an uniform buffer to the current webGL context
      * @param buffer defines the buffer to bind
      */
-    public bindUniformBuffer(buffer: Nullable<WebGLBuffer>): void {
-        this._gl.bindBuffer(this._gl.UNIFORM_BUFFER, buffer);
+    public bindUniformBuffer(buffer: Nullable<DataBuffer>): void {
+        this._gl.bindBuffer(this._gl.UNIFORM_BUFFER, buffer ? buffer.underlyingResource : null);
     }
 
     /**
@@ -2876,32 +2826,34 @@ export class Engine {
      * @param buffer defines the buffer to bind
      * @param location defines the index where to bind the buffer
      */
-    public bindUniformBufferBase(buffer: WebGLBuffer, location: number): void {
-        this._gl.bindBufferBase(this._gl.UNIFORM_BUFFER, location, buffer);
+    public bindUniformBufferBase(buffer: DataBuffer, location: number): void {
+        this._gl.bindBufferBase(this._gl.UNIFORM_BUFFER, location, buffer ? buffer.underlyingResource : null);
     }
 
     /**
      * Bind a specific block at a given index in a specific shader program
-     * @param shaderProgram defines the shader program
+     * @param pipelineContext defines the pipeline context to use
      * @param blockName defines the block name
      * @param index defines the index where to bind the block
      */
-    public bindUniformBlock(shaderProgram: WebGLProgram, blockName: string, index: number): void {
-        var uniformLocation = this._gl.getUniformBlockIndex(shaderProgram, blockName);
+    public bindUniformBlock(pipelineContext: IPipelineContext, blockName: string, index: number): void {
+        let program = (pipelineContext as WebGLPipelineContext).program!;
 
-        this._gl.uniformBlockBinding(shaderProgram, uniformLocation, index);
+        var uniformLocation = this._gl.getUniformBlockIndex(program, blockName);
+
+        this._gl.uniformBlockBinding(program, uniformLocation, index);
     }
 
-    private bindIndexBuffer(buffer: Nullable<WebGLBuffer>): void {
+    private bindIndexBuffer(buffer: Nullable<DataBuffer>): void {
         if (!this._vaoRecordInProgress) {
             this._unbindVertexArrayObject();
         }
         this.bindBuffer(buffer, this._gl.ELEMENT_ARRAY_BUFFER);
     }
 
-    private bindBuffer(buffer: Nullable<WebGLBuffer>, target: number): void {
+    private bindBuffer(buffer: Nullable<DataBuffer>, target: number): void {
         if (this._vaoRecordInProgress || this._currentBoundBuffer[target] !== buffer) {
-            this._gl.bindBuffer(target, buffer);
+            this._gl.bindBuffer(target, buffer ? buffer.underlyingResource : null);
             this._currentBoundBuffer[target] = buffer;
         }
     }
@@ -2914,7 +2866,7 @@ export class Engine {
         this._gl.bufferSubData(this._gl.ARRAY_BUFFER, 0, data);
     }
 
-    private _vertexAttribPointer(buffer: WebGLBuffer, indx: number, size: number, type: number, normalized: boolean, stride: number, offset: number): void {
+    private _vertexAttribPointer(buffer: DataBuffer, indx: number, size: number, type: number, normalized: boolean, stride: number, offset: number): void {
         var pointer = this._currentBufferPointers[indx];
 
         var changed = false;
@@ -2943,7 +2895,7 @@ export class Engine {
         }
     }
 
-    private _bindIndexBufferWithCache(indexBuffer: Nullable<WebGLBuffer>): void {
+    private _bindIndexBufferWithCache(indexBuffer: Nullable<DataBuffer>): void {
         if (indexBuffer == null) {
             return;
         }
@@ -3002,7 +2954,7 @@ export class Engine {
      * @param effect defines the effect to store
      * @returns the new vertex array object
      */
-    public recordVertexArrayObject(vertexBuffers: { [key: string]: VertexBuffer; }, indexBuffer: Nullable<WebGLBuffer>, effect: Effect): WebGLVertexArrayObject {
+    public recordVertexArrayObject(vertexBuffers: { [key: string]: VertexBuffer; }, indexBuffer: Nullable<DataBuffer>, effect: Effect): WebGLVertexArrayObject {
         var vao = this._gl.createVertexArray();
 
         this._vaoRecordInProgress = true;
@@ -3026,7 +2978,7 @@ export class Engine {
      * @param vertexArrayObject defines the vertex array object to bind
      * @param indexBuffer defines the index buffer to bind
      */
-    public bindVertexArrayObject(vertexArrayObject: WebGLVertexArrayObject, indexBuffer: Nullable<WebGLBuffer>): void {
+    public bindVertexArrayObject(vertexArrayObject: WebGLVertexArrayObject, indexBuffer: Nullable<DataBuffer>): void {
         if (this._cachedVertexArrayObject !== vertexArrayObject) {
             this._cachedVertexArrayObject = vertexArrayObject;
 
@@ -3047,7 +2999,7 @@ export class Engine {
      * @param vertexStrideSize defines the vertex stride of the vertex buffer
      * @param effect defines the effect associated with the vertex buffer
      */
-    public bindBuffersDirectly(vertexBuffer: WebGLBuffer, indexBuffer: WebGLBuffer, vertexDeclaration: number[], vertexStrideSize: number, effect: Effect): void {
+    public bindBuffersDirectly(vertexBuffer: DataBuffer, indexBuffer: DataBuffer, vertexDeclaration: number[], vertexStrideSize: number, effect: Effect): void {
         if (this._cachedVertexBuffers !== vertexBuffer || this._cachedEffectForVertexBuffers !== effect) {
             this._cachedVertexBuffers = vertexBuffer;
             this._cachedEffectForVertexBuffers = effect;
@@ -3093,7 +3045,7 @@ export class Engine {
      * @param indexBuffer defines the index buffer to bind
      * @param effect defines the effect associated with the vertex buffers
      */
-    public bindBuffers(vertexBuffers: { [key: string]: Nullable<VertexBuffer> }, indexBuffer: Nullable<WebGLBuffer>, effect: Effect): void {
+    public bindBuffers(vertexBuffers: { [key: string]: Nullable<VertexBuffer> }, indexBuffer: Nullable<DataBuffer>, effect: Effect): void {
         if (this._cachedVertexBuffers !== vertexBuffers || this._cachedEffectForVertexBuffers !== effect) {
             this._cachedVertexBuffers = vertexBuffers;
             this._cachedEffectForVertexBuffers = effect;
@@ -3131,11 +3083,11 @@ export class Engine {
     }
 
     /** @hidden */
-    public _releaseBuffer(buffer: WebGLBuffer): boolean {
+    public _releaseBuffer(buffer: DataBuffer): boolean {
         buffer.references--;
 
         if (buffer.references === 0) {
-            this._gl.deleteBuffer(buffer);
+            this._gl.deleteBuffer(buffer.underlyingResource);
             return true;
         }
 
@@ -3147,18 +3099,19 @@ export class Engine {
      * @param capacity defines the size of the buffer
      * @returns the webGL buffer
      */
-    public createInstancesBuffer(capacity: number): WebGLBuffer {
+    public createInstancesBuffer(capacity: number): DataBuffer {
         var buffer = this._gl.createBuffer();
 
         if (!buffer) {
             throw new Error("Unable to create instance buffer");
         }
 
-        buffer.capacity = capacity;
+        var result = new WebGLDataBuffer(buffer);
+        result.capacity = capacity;
 
-        this.bindArrayBuffer(buffer);
+        this.bindArrayBuffer(result);
         this._gl.bufferData(this._gl.ARRAY_BUFFER, capacity, this._gl.DYNAMIC_DRAW);
-        return buffer;
+        return result;
     }
 
     /**
@@ -3175,7 +3128,7 @@ export class Engine {
      * @param data defines the data to store in the buffer
      * @param offsetLocations defines the offsets or attributes information used to determine where data must be stored in the buffer
      */
-    public updateAndBindInstancesBuffer(instancesBuffer: WebGLBuffer, data: Float32Array, offsetLocations: number[] | InstancingAttributeInfo[]): void {
+    public updateAndBindInstancesBuffer(instancesBuffer: DataBuffer, data: Float32Array, offsetLocations: number[] | InstancingAttributeInfo[]): void {
         this.bindArrayBuffer(instancesBuffer);
         if (data) {
             this._gl.bufferSubData(this._gl.ARRAY_BUFFER, 0, data);
@@ -3336,21 +3289,22 @@ export class Engine {
         if (this._compiledEffects[effect._key]) {
             delete this._compiledEffects[effect._key];
 
-            this._deleteProgram(effect.getProgram());
+            this._deletePipelineContext(effect.getPipelineContext() as WebGLPipelineContext);
         }
     }
 
     /** @hidden */
-    public _deleteProgram(program: WebGLProgram): void {
-        if (program) {
-            program.__SPECTOR_rebuildProgram = null;
+    public _deletePipelineContext(pipelineContext: IPipelineContext): void {
+        let webGLPipelineContext = pipelineContext as WebGLPipelineContext;
+        if (webGLPipelineContext && webGLPipelineContext.program) {
+            webGLPipelineContext.program.__SPECTOR_rebuildProgram = null;
 
-            if (program.transformFeedback) {
-                this.deleteTransformFeedback(program.transformFeedback);
-                program.transformFeedback = null;
+            if (webGLPipelineContext.transformFeedback) {
+                this.deleteTransformFeedback(webGLPipelineContext.transformFeedback);
+                webGLPipelineContext.transformFeedback = null;
             }
 
-            this._gl.deleteProgram(program);
+            this._gl.deleteProgram(webGLPipelineContext.program);
         }
     }
 
@@ -3408,23 +3362,25 @@ export class Engine {
 
     /**
      * Directly creates a webGL program
+     * @param pipelineContext  defines the pipeline context to attach to
      * @param vertexCode defines the vertex shader code to use
      * @param fragmentCode defines the fragment shader code to use
      * @param context defines the webGL context to use (if not set, the current one will be used)
      * @param transformFeedbackVaryings defines the list of transform feedback varyings to use
      * @returns the new webGL program
      */
-    public createRawShaderProgram(vertexCode: string, fragmentCode: string, context?: WebGLRenderingContext, transformFeedbackVaryings: Nullable<string[]> = null): WebGLProgram {
+    public createRawShaderProgram(pipelineContext: IPipelineContext, vertexCode: string, fragmentCode: string, context?: WebGLRenderingContext, transformFeedbackVaryings: Nullable<string[]> = null): WebGLProgram {
         context = context || this._gl;
 
         var vertexShader = this._compileRawShader(vertexCode, "vertex");
         var fragmentShader = this._compileRawShader(fragmentCode, "fragment");
 
-        return this._createShaderProgram(vertexShader, fragmentShader, context, transformFeedbackVaryings);
+        return this._createShaderProgram(pipelineContext as WebGLPipelineContext, vertexShader, fragmentShader, context, transformFeedbackVaryings);
     }
 
     /**
      * Creates a webGL program
+     * @param pipelineContext  defines the pipeline context to attach to
      * @param vertexCode  defines the vertex shader code to use
      * @param fragmentCode defines the fragment shader code to use
      * @param defines defines the string containing the defines to use to compile the shaders
@@ -3432,7 +3388,7 @@ export class Engine {
      * @param transformFeedbackVaryings defines the list of transform feedback varyings to use
      * @returns the new webGL program
      */
-    public createShaderProgram(vertexCode: string, fragmentCode: string, defines: Nullable<string>, context?: WebGLRenderingContext, transformFeedbackVaryings: Nullable<string[]> = null): WebGLProgram {
+    public createShaderProgram(pipelineContext: IPipelineContext, vertexCode: string, fragmentCode: string, defines: Nullable<string>, context?: WebGLRenderingContext, transformFeedbackVaryings: Nullable<string[]> = null): WebGLProgram {
         context = context || this._gl;
 
         this.onBeforeShaderCompilationObservable.notifyObservers(this);
@@ -3441,22 +3397,34 @@ export class Engine {
         var vertexShader = this._compileShader(vertexCode, "vertex", defines, shaderVersion);
         var fragmentShader = this._compileShader(fragmentCode, "fragment", defines, shaderVersion);
 
-        let program = this._createShaderProgram(vertexShader, fragmentShader, context, transformFeedbackVaryings);
+        let program = this._createShaderProgram(pipelineContext as WebGLPipelineContext, vertexShader, fragmentShader, context, transformFeedbackVaryings);
 
         this.onAfterShaderCompilationObservable.notifyObservers(this);
 
         return program;
     }
 
-    private _createShaderProgram(vertexShader: WebGLShader, fragmentShader: WebGLShader, context: WebGLRenderingContext, transformFeedbackVaryings: Nullable<string[]> = null): WebGLProgram {
+    /**
+     * Creates a new pipeline context
+     * @returns the new pipeline
+     */
+    public createPipelineContext() {
+        var pipelineContext = new WebGLPipelineContext();
+        pipelineContext.engine = this;
+
+        if (this._caps.parallelShaderCompile) {
+            pipelineContext.isParallelCompiled = true;
+        }
+
+        return pipelineContext;
+    }
+
+    private _createShaderProgram(pipelineContext: WebGLPipelineContext, vertexShader: WebGLShader, fragmentShader: WebGLShader, context: WebGLRenderingContext, transformFeedbackVaryings: Nullable<string[]> = null): WebGLProgram {
         var shaderProgram = context.createProgram();
+        pipelineContext.program = shaderProgram;
 
         if (!shaderProgram) {
             throw new Error("Unable to create program");
-        }
-
-        if (this._caps.parallelShaderCompile) {
-            shaderProgram.isParallelCompiled = true;
         }
 
         context.attachShader(shaderProgram, vertexShader);
@@ -3467,7 +3435,7 @@ export class Engine {
 
             this.bindTransformFeedback(transformFeedback);
             this.setTranformFeedbackVaryings(shaderProgram, transformFeedbackVaryings);
-            shaderProgram.transformFeedback = transformFeedback;
+            pipelineContext.transformFeedback = transformFeedback;
         }
 
         context.linkProgram(shaderProgram);
@@ -3476,23 +3444,24 @@ export class Engine {
             this.bindTransformFeedback(null);
         }
 
-        shaderProgram.context = context;
-        shaderProgram.vertexShader = vertexShader;
-        shaderProgram.fragmentShader = fragmentShader;
+        pipelineContext.context = context;
+        pipelineContext.vertexShader = vertexShader;
+        pipelineContext.fragmentShader = fragmentShader;
 
-        if (!shaderProgram.isParallelCompiled) {
-            this._finalizeProgram(shaderProgram);
+        if (!pipelineContext.isParallelCompiled) {
+            this._finalizePipelineContext(pipelineContext);
         }
 
         return shaderProgram;
     }
 
-    private _finalizeProgram(shaderProgram: WebGLProgram) {
-        const context = shaderProgram.context!;
-        const vertexShader = shaderProgram.vertexShader!;
-        const fragmentShader = shaderProgram.fragmentShader!;
+    private _finalizePipelineContext(pipelineContext: WebGLPipelineContext) {
+        const context = pipelineContext.context!;
+        const vertexShader = pipelineContext.vertexShader!;
+        const fragmentShader = pipelineContext.fragmentShader!;
+        const program = pipelineContext.program!;
 
-        var linked = context.getProgramParameter(shaderProgram, context.LINK_STATUS);
+        var linked = context.getProgramParameter(program, context.LINK_STATUS);
 
         if (!linked) { // Get more info
 
@@ -3512,18 +3481,18 @@ export class Engine {
                 }
             }
 
-            var error = context.getProgramInfoLog(shaderProgram);
+            var error = context.getProgramInfoLog(program);
             if (error) {
                 throw new Error(error);
             }
         }
 
         if (this.validateShaderPrograms) {
-            context.validateProgram(shaderProgram);
-            var validated = context.getProgramParameter(shaderProgram, context.VALIDATE_STATUS);
+            context.validateProgram(program);
+            var validated = context.getProgramParameter(program, context.VALIDATE_STATUS);
 
             if (!validated) {
-                var error = context.getProgramInfoLog(shaderProgram);
+                var error = context.getProgramInfoLog(program);
                 if (error) {
                     throw new Error(error);
                 }
@@ -3533,24 +3502,37 @@ export class Engine {
         context.deleteShader(vertexShader);
         context.deleteShader(fragmentShader);
 
-        shaderProgram.context = undefined;
-        shaderProgram.vertexShader = undefined;
-        shaderProgram.fragmentShader = undefined;
+        pipelineContext.context = undefined;
+        pipelineContext.vertexShader = undefined;
+        pipelineContext.fragmentShader = undefined;
 
-        if (shaderProgram.onCompiled) {
-            shaderProgram.onCompiled();
-            shaderProgram.onCompiled = undefined;
+        if (pipelineContext.onCompiled) {
+            pipelineContext.onCompiled();
+            pipelineContext.onCompiled = undefined;
         }
     }
 
     /** @hidden */
-    public _isProgramCompiled(shaderProgram: WebGLProgram): boolean {
-        if (!shaderProgram.isParallelCompiled) {
-            return true;
-        }
+    public _preparePipelineContext(pipelineContext: IPipelineContext, vertexSourceCode: string, fragmentSourceCode: string, createAsRaw: boolean,
+        rebuildRebind: any,
+        defines: Nullable<string>,
+        transformFeedbackVaryings: Nullable<string[]>) {
+        let webGLRenderingState = pipelineContext as WebGLPipelineContext;
 
-        if (this._gl.getProgramParameter(shaderProgram, this._caps.parallelShaderCompile.COMPLETION_STATUS_KHR)) {
-            this._finalizeProgram(shaderProgram);
+        if (createAsRaw) {
+            webGLRenderingState.program = this.createRawShaderProgram(webGLRenderingState, vertexSourceCode, fragmentSourceCode, undefined, transformFeedbackVaryings);
+        }
+        else {
+            webGLRenderingState.program = this.createShaderProgram(webGLRenderingState, vertexSourceCode, fragmentSourceCode, defines, undefined, transformFeedbackVaryings);
+        }
+        webGLRenderingState.program.__SPECTOR_rebuildProgram = rebuildRebind;
+    }
+
+    /** @hidden */
+    public _isRenderingStateCompiled(pipelineContext: IPipelineContext): boolean {
+        let webGLPipelineContext = pipelineContext as WebGLPipelineContext;
+        if (this._gl.getProgramParameter(webGLPipelineContext.program!, this._caps.parallelShaderCompile.COMPLETION_STATUS_KHR)) {
+            this._finalizePipelineContext(webGLPipelineContext);
             return true;
         }
 
@@ -3558,26 +3540,29 @@ export class Engine {
     }
 
     /** @hidden */
-    public _executeWhenProgramIsCompiled(shaderProgram: WebGLProgram, action: () => void) {
-        if (!shaderProgram.isParallelCompiled) {
+    public _executeWhenRenderingStateIsCompiled(pipelineContext: IPipelineContext, action: () => void) {
+        let webGLPipelineContext = pipelineContext as WebGLPipelineContext;
+
+        if (!webGLPipelineContext.isParallelCompiled) {
             action();
             return;
         }
 
-        shaderProgram.onCompiled = action;
+        webGLPipelineContext.onCompiled = action;
     }
 
     /**
      * Gets the list of webGL uniform locations associated with a specific program based on a list of uniform names
-     * @param shaderProgram defines the webGL program to use
+     * @param pipelineContext defines the pipeline context to use
      * @param uniformsNames defines the list of uniform names
      * @returns an array of webGL uniform locations
      */
-    public getUniforms(shaderProgram: WebGLProgram, uniformsNames: string[]): Nullable<WebGLUniformLocation>[] {
+    public getUniforms(pipelineContext: IPipelineContext, uniformsNames: string[]): Nullable<WebGLUniformLocation>[] {
         var results = new Array<Nullable<WebGLUniformLocation>>();
+        let webGLPipelineContext = pipelineContext as WebGLPipelineContext;
 
         for (var index = 0; index < uniformsNames.length; index++) {
-            results.push(this._gl.getUniformLocation(shaderProgram, uniformsNames[index]));
+            results.push(this._gl.getUniformLocation(webGLPipelineContext.program!, uniformsNames[index]));
         }
 
         return results;
@@ -3585,16 +3570,17 @@ export class Engine {
 
     /**
      * Gets the lsit of active attributes for a given webGL program
-     * @param shaderProgram defines the webGL program to use
+     * @param pipelineContext defines the pipeline context to use
      * @param attributesNames defines the list of attribute names to get
      * @returns an array of indices indicating the offset of each attribute
      */
-    public getAttributes(shaderProgram: WebGLProgram, attributesNames: string[]): number[] {
+    public getAttributes(pipelineContext: IPipelineContext, attributesNames: string[]): number[] {
         var results = [];
+        let webGLPipelineContext = pipelineContext as WebGLPipelineContext;
 
         for (var index = 0; index < attributesNames.length; index++) {
             try {
-                results.push(this._gl.getAttribLocation(shaderProgram, attributesNames[index]));
+                results.push(this._gl.getAttribLocation(webGLPipelineContext.program!, attributesNames[index]));
             } catch (e) {
                 results.push(-1);
             }
@@ -4300,51 +4286,6 @@ export class Engine {
         };
     }
 
-    private _partialLoadImg(url: string, index: number, loadedImages: HTMLImageElement[], scene: Nullable<Scene>,
-        onfinish: (images: HTMLImageElement[]) => void, onErrorCallBack: Nullable<(message?: string, exception?: any) => void> = null) {
-
-        var img: HTMLImageElement;
-
-        var onload = () => {
-            loadedImages[index] = img;
-            (<any>loadedImages)._internalCount++;
-
-            if (scene) {
-                scene._removePendingData(img);
-            }
-
-            if ((<any>loadedImages)._internalCount === 6) {
-                onfinish(loadedImages);
-            }
-        };
-
-        var onerror = (message?: string, exception?: any) => {
-            if (scene) {
-                scene._removePendingData(img);
-            }
-
-            if (onErrorCallBack) {
-                onErrorCallBack(message, exception);
-            }
-        };
-
-        img = Tools.LoadImage(url, onload, onerror, scene ? scene.offlineProvider : null);
-        if (scene) {
-            scene._addPendingData(img);
-        }
-    }
-
-    private _cascadeLoadImgs(scene: Nullable<Scene>,
-        onfinish: (images: HTMLImageElement[]) => void, files: string[], onError: Nullable<(message?: string, exception?: any) => void> = null) {
-
-        var loadedImages: HTMLImageElement[] = [];
-        (<any>loadedImages)._internalCount = 0;
-
-        for (let index = 0; index < 6; index++) {
-            this._partialLoadImg(files[index], index, loadedImages, scene, onfinish, onError);
-        }
-    }
-
     /** @hidden */
     public _createTexture(): WebGLTexture {
         let texture = this._gl.createTexture();
@@ -4835,7 +4776,8 @@ export class Engine {
         texture._comparisonFunction = comparisonFunction;
     }
 
-    private _setupDepthStencilTexture(internalTexture: InternalTexture, size: number | { width: number, height: number }, generateStencil: boolean, bilinearFiltering: boolean, comparisonFunction: number): void {
+    /** @hidden */
+    public _setupDepthStencilTexture(internalTexture: InternalTexture, size: number | { width: number, height: number }, generateStencil: boolean, bilinearFiltering: boolean, comparisonFunction: number): void {
         var width = (<{ width: number, height: number }>size).width || <number>size;
         var height = (<{ width: number, height: number }>size).height || <number>size;
         internalTexture.baseWidth = width;
@@ -4936,49 +4878,6 @@ export class Engine {
     }
 
     /**
-     * Creates a depth stencil cube texture.
-     * This is only available in WebGL 2.
-     * @param size The size of face edge in the cube texture.
-     * @param options The options defining the cube texture.
-     * @returns The cube texture
-     */
-    private _createDepthStencilCubeTexture(size: number, options: DepthTextureCreationOptions): InternalTexture {
-        var internalTexture = new InternalTexture(this, InternalTexture.DATASOURCE_UNKNOWN);
-        internalTexture.isCube = true;
-
-        if (this.webGLVersion === 1) {
-            Logger.Error("Depth cube texture is not supported by WebGL 1.");
-            return internalTexture;
-        }
-
-        var internalOptions = {
-            bilinearFiltering: false,
-            comparisonFunction: 0,
-            generateStencil: false,
-            ...options
-        };
-
-        var gl = this._gl;
-        this._bindTextureDirectly(gl.TEXTURE_CUBE_MAP, internalTexture, true);
-
-        this._setupDepthStencilTexture(internalTexture, size, internalOptions.generateStencil, internalOptions.bilinearFiltering, internalOptions.comparisonFunction);
-
-        // Create the depth/stencil buffer
-        for (var face = 0; face < 6; face++) {
-            if (internalOptions.generateStencil) {
-                gl.texImage2D(gl.TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, gl.DEPTH24_STENCIL8, size, size, 0, gl.DEPTH_STENCIL, gl.UNSIGNED_INT_24_8, null);
-            }
-            else {
-                gl.texImage2D(gl.TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, gl.DEPTH_COMPONENT24, size, size, 0, gl.DEPTH_COMPONENT, gl.UNSIGNED_INT, null);
-            }
-        }
-
-        this._bindTextureDirectly(gl.TEXTURE_CUBE_MAP, null);
-
-        return internalTexture;
-    }
-
-    /**
      * Sets the frame buffer Depth / Stencil attachement of the render target to the defined depth stencil texture.
      * @param renderTarget The render target to set the frame buffer for
      */
@@ -4992,7 +4891,7 @@ export class Engine {
         var gl = this._gl;
         var depthStencilTexture = renderTarget.depthStencilTexture;
 
-        this.bindUnboundFramebuffer(internalTexture._framebuffer);
+        this._bindUnboundFramebuffer(internalTexture._framebuffer);
         if (depthStencilTexture.isCube) {
             if (depthStencilTexture._generateStencilBuffer) {
                 gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_STENCIL_ATTACHMENT, gl.TEXTURE_CUBE_MAP_POSITIVE_X, depthStencilTexture._webGLTexture, 0);
@@ -5009,7 +4908,7 @@ export class Engine {
                 gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, depthStencilTexture._webGLTexture, 0);
             }
         }
-        this.bindUnboundFramebuffer(null);
+        this._bindUnboundFramebuffer(null);
     }
 
     /**
@@ -5070,7 +4969,7 @@ export class Engine {
         // Create the framebuffer
         var currentFrameBuffer = this._currentFramebuffer;
         var framebuffer = gl.createFramebuffer();
-        this.bindUnboundFramebuffer(framebuffer);
+        this._bindUnboundFramebuffer(framebuffer);
         gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture._webGLTexture, 0);
 
         texture._depthStencilBuffer = this._setupFramebufferDepthAttachments(fullOptions.generateStencilBuffer ? true : false, fullOptions.generateDepthBuffer, width, height);
@@ -5082,7 +4981,7 @@ export class Engine {
         // Unbind
         this._bindTextureDirectly(gl.TEXTURE_2D, null);
         gl.bindRenderbuffer(gl.RENDERBUFFER, null);
-        this.bindUnboundFramebuffer(currentFrameBuffer);
+        this._bindUnboundFramebuffer(currentFrameBuffer);
 
         texture._framebuffer = framebuffer;
         texture.baseWidth = width;
@@ -5105,172 +5004,8 @@ export class Engine {
         return texture;
     }
 
-    /**
-     * Create a multi render target texture
-     * @see http://doc.babylonjs.com/features/webgl2#multiple-render-target
-     * @param size defines the size of the texture
-     * @param options defines the creation options
-     * @returns the cube texture as an InternalTexture
-     */
-    public createMultipleRenderTarget(size: any, options: IMultiRenderTargetOptions): InternalTexture[] {
-        var generateMipMaps = false;
-        var generateDepthBuffer = true;
-        var generateStencilBuffer = false;
-        var generateDepthTexture = false;
-        var textureCount = 1;
-
-        var defaultType = Engine.TEXTURETYPE_UNSIGNED_INT;
-        var defaultSamplingMode = Engine.TEXTURE_TRILINEAR_SAMPLINGMODE;
-
-        var types = new Array<number>();
-        var samplingModes = new Array<number>();
-
-        if (options !== undefined) {
-            generateMipMaps = options.generateMipMaps === undefined ? false : options.generateMipMaps;
-            generateDepthBuffer = options.generateDepthBuffer === undefined ? true : options.generateDepthBuffer;
-            generateStencilBuffer = options.generateStencilBuffer === undefined ? false : options.generateStencilBuffer;
-            generateDepthTexture = options.generateDepthTexture === undefined ? false : options.generateDepthTexture;
-            textureCount = options.textureCount || 1;
-
-            if (options.types) {
-                types = options.types;
-            }
-            if (options.samplingModes) {
-                samplingModes = options.samplingModes;
-            }
-
-        }
-        var gl = this._gl;
-        // Create the framebuffer
-        var framebuffer = gl.createFramebuffer();
-        this.bindUnboundFramebuffer(framebuffer);
-
-        var width = size.width || size;
-        var height = size.height || size;
-
-        var textures = [];
-        var attachments = [];
-
-        var depthStencilBuffer = this._setupFramebufferDepthAttachments(generateStencilBuffer, generateDepthBuffer, width, height);
-
-        for (var i = 0; i < textureCount; i++) {
-            var samplingMode = samplingModes[i] || defaultSamplingMode;
-            var type = types[i] || defaultType;
-
-            if (type === Engine.TEXTURETYPE_FLOAT && !this._caps.textureFloatLinearFiltering) {
-                // if floating point linear (gl.FLOAT) then force to NEAREST_SAMPLINGMODE
-                samplingMode = Engine.TEXTURE_NEAREST_SAMPLINGMODE;
-            }
-            else if (type === Engine.TEXTURETYPE_HALF_FLOAT && !this._caps.textureHalfFloatLinearFiltering) {
-                // if floating point linear (HALF_FLOAT) then force to NEAREST_SAMPLINGMODE
-                samplingMode = Engine.TEXTURE_NEAREST_SAMPLINGMODE;
-            }
-
-            var filters = this._getSamplingParameters(samplingMode, generateMipMaps);
-            if (type === Engine.TEXTURETYPE_FLOAT && !this._caps.textureFloat) {
-                type = Engine.TEXTURETYPE_UNSIGNED_INT;
-                Logger.Warn("Float textures are not supported. Render target forced to TEXTURETYPE_UNSIGNED_BYTE type");
-            }
-
-            var texture = new InternalTexture(this, InternalTexture.DATASOURCE_MULTIRENDERTARGET);
-            var attachment = (<any>gl)[this.webGLVersion > 1 ? "COLOR_ATTACHMENT" + i : "COLOR_ATTACHMENT" + i + "_WEBGL"];
-
-            textures.push(texture);
-            attachments.push(attachment);
-
-            gl.activeTexture((<any>gl)["TEXTURE" + i]);
-            gl.bindTexture(gl.TEXTURE_2D, texture._webGLTexture);
-
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filters.mag);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filters.min);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-
-            gl.texImage2D(gl.TEXTURE_2D, 0, this._getRGBABufferInternalSizedFormat(type), width, height, 0, gl.RGBA, this._getWebGLTextureType(type), null);
-
-            gl.framebufferTexture2D(gl.DRAW_FRAMEBUFFER, attachment, gl.TEXTURE_2D, texture._webGLTexture, 0);
-
-            if (generateMipMaps) {
-                this._gl.generateMipmap(this._gl.TEXTURE_2D);
-            }
-
-            // Unbind
-            this._bindTextureDirectly(gl.TEXTURE_2D, null);
-
-            texture._framebuffer = framebuffer;
-            texture._depthStencilBuffer = depthStencilBuffer;
-            texture.baseWidth = width;
-            texture.baseHeight = height;
-            texture.width = width;
-            texture.height = height;
-            texture.isReady = true;
-            texture.samples = 1;
-            texture.generateMipMaps = generateMipMaps;
-            texture.samplingMode = samplingMode;
-            texture.type = type;
-            texture._generateDepthBuffer = generateDepthBuffer;
-            texture._generateStencilBuffer = generateStencilBuffer;
-            texture._attachments = attachments;
-
-            this._internalTexturesCache.push(texture);
-        }
-
-        if (generateDepthTexture && this._caps.depthTextureExtension) {
-            // Depth texture
-            var depthTexture = new InternalTexture(this, InternalTexture.DATASOURCE_MULTIRENDERTARGET);
-
-            gl.activeTexture(gl.TEXTURE0);
-            gl.bindTexture(gl.TEXTURE_2D, depthTexture._webGLTexture);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-            gl.texImage2D(
-                gl.TEXTURE_2D,
-                0,
-                this.webGLVersion < 2 ? gl.DEPTH_COMPONENT : gl.DEPTH_COMPONENT16,
-                width,
-                height,
-                0,
-                gl.DEPTH_COMPONENT,
-                gl.UNSIGNED_SHORT,
-                null
-            );
-
-            gl.framebufferTexture2D(
-                gl.FRAMEBUFFER,
-                gl.DEPTH_ATTACHMENT,
-                gl.TEXTURE_2D,
-                depthTexture._webGLTexture,
-                0
-            );
-
-            depthTexture._framebuffer = framebuffer;
-            depthTexture.baseWidth = width;
-            depthTexture.baseHeight = height;
-            depthTexture.width = width;
-            depthTexture.height = height;
-            depthTexture.isReady = true;
-            depthTexture.samples = 1;
-            depthTexture.generateMipMaps = generateMipMaps;
-            depthTexture.samplingMode = gl.NEAREST;
-            depthTexture._generateDepthBuffer = generateDepthBuffer;
-            depthTexture._generateStencilBuffer = generateStencilBuffer;
-
-            textures.push(depthTexture);
-            this._internalTexturesCache.push(depthTexture);
-        }
-
-        gl.drawBuffers(attachments);
-        gl.bindRenderbuffer(gl.RENDERBUFFER, null);
-        this.bindUnboundFramebuffer(null);
-
-        this.resetTextureCache();
-
-        return textures;
-    }
-
-    private _setupFramebufferDepthAttachments(generateStencilBuffer: boolean, generateDepthBuffer: boolean, width: number, height: number, samples = 1): Nullable<WebGLRenderbuffer> {
+    /** @hidden */
+    public _setupFramebufferDepthAttachments(generateStencilBuffer: boolean, generateDepthBuffer: boolean, width: number, height: number, samples = 1): Nullable<WebGLRenderbuffer> {
         var depthStencilBuffer: Nullable<WebGLRenderbuffer> = null;
         var gl = this._gl;
 
@@ -5347,7 +5082,7 @@ export class Engine {
             }
 
             texture._MSAAFramebuffer = framebuffer;
-            this.bindUnboundFramebuffer(texture._MSAAFramebuffer);
+            this._bindUnboundFramebuffer(texture._MSAAFramebuffer);
 
             var colorRenderbuffer = gl.createRenderbuffer();
 
@@ -5362,97 +5097,14 @@ export class Engine {
 
             texture._MSAARenderBuffer = colorRenderbuffer;
         } else {
-            this.bindUnboundFramebuffer(texture._framebuffer);
+            this._bindUnboundFramebuffer(texture._framebuffer);
         }
 
         texture.samples = samples;
         texture._depthStencilBuffer = this._setupFramebufferDepthAttachments(texture._generateStencilBuffer, texture._generateDepthBuffer, texture.width, texture.height, samples);
 
         gl.bindRenderbuffer(gl.RENDERBUFFER, null);
-        this.bindUnboundFramebuffer(null);
-
-        return samples;
-    }
-
-    /**
-     * Update the sample count for a given multiple render target texture
-     * @see http://doc.babylonjs.com/features/webgl2#multisample-render-targets
-     * @param textures defines the textures to update
-     * @param samples defines the sample count to set
-     * @returns the effective sample count (could be 0 if multisample render targets are not supported)
-     */
-    public updateMultipleRenderTargetTextureSampleCount(textures: Nullable<InternalTexture[]>, samples: number): number {
-        if (this.webGLVersion < 2 || !textures || textures.length == 0) {
-            return 1;
-        }
-
-        if (textures[0].samples === samples) {
-            return samples;
-        }
-
-        var gl = this._gl;
-
-        samples = Math.min(samples, gl.getParameter(gl.MAX_SAMPLES));
-
-        // Dispose previous render buffers
-        if (textures[0]._depthStencilBuffer) {
-            gl.deleteRenderbuffer(textures[0]._depthStencilBuffer);
-            textures[0]._depthStencilBuffer = null;
-        }
-
-        if (textures[0]._MSAAFramebuffer) {
-            gl.deleteFramebuffer(textures[0]._MSAAFramebuffer);
-            textures[0]._MSAAFramebuffer = null;
-        }
-
-        for (var i = 0; i < textures.length; i++) {
-            if (textures[i]._MSAARenderBuffer) {
-                gl.deleteRenderbuffer(textures[i]._MSAARenderBuffer);
-                textures[i]._MSAARenderBuffer = null;
-            }
-        }
-
-        if (samples > 1) {
-            let framebuffer = gl.createFramebuffer();
-
-            if (!framebuffer) {
-                throw new Error("Unable to create multi sampled framebuffer");
-            }
-
-            this.bindUnboundFramebuffer(framebuffer);
-
-            let depthStencilBuffer = this._setupFramebufferDepthAttachments(textures[0]._generateStencilBuffer, textures[0]._generateDepthBuffer, textures[0].width, textures[0].height, samples);
-
-            var attachments = [];
-
-            for (var i = 0; i < textures.length; i++) {
-                var texture = textures[i];
-                var attachment = (<any>gl)[this.webGLVersion > 1 ? "COLOR_ATTACHMENT" + i : "COLOR_ATTACHMENT" + i + "_WEBGL"];
-
-                var colorRenderbuffer = gl.createRenderbuffer();
-
-                if (!colorRenderbuffer) {
-                    throw new Error("Unable to create multi sampled framebuffer");
-                }
-
-                gl.bindRenderbuffer(gl.RENDERBUFFER, colorRenderbuffer);
-                gl.renderbufferStorageMultisample(gl.RENDERBUFFER, samples, this._getRGBAMultiSampleBufferFormat(texture.type), texture.width, texture.height);
-
-                gl.framebufferRenderbuffer(gl.FRAMEBUFFER, attachment, gl.RENDERBUFFER, colorRenderbuffer);
-
-                texture._MSAAFramebuffer = framebuffer;
-                texture._MSAARenderBuffer = colorRenderbuffer;
-                texture.samples = samples;
-                texture._depthStencilBuffer = depthStencilBuffer;
-                gl.bindRenderbuffer(gl.RENDERBUFFER, null);
-                attachments.push(attachment);
-            }
-            gl.drawBuffers(attachments);
-        } else {
-            this.bindUnboundFramebuffer(textures[0]._framebuffer);
-        }
-
-        this.bindUnboundFramebuffer(null);
+        this._bindUnboundFramebuffer(null);
 
         return samples;
     }
@@ -5527,231 +5179,6 @@ export class Engine {
     }
 
     /**
-     * Creates a new render target cube texture
-     * @param size defines the size of the texture
-     * @param options defines the options used to create the texture
-     * @returns a new render target cube texture stored in an InternalTexture
-     */
-    public createRenderTargetCubeTexture(size: number, options?: Partial<RenderTargetCreationOptions>): InternalTexture {
-        let fullOptions = {
-            generateMipMaps: true,
-            generateDepthBuffer: true,
-            generateStencilBuffer: false,
-            type: Engine.TEXTURETYPE_UNSIGNED_INT,
-            samplingMode: Engine.TEXTURE_TRILINEAR_SAMPLINGMODE,
-            format: Engine.TEXTUREFORMAT_RGBA,
-            ...options
-        };
-        fullOptions.generateStencilBuffer = fullOptions.generateDepthBuffer && fullOptions.generateStencilBuffer;
-
-        if (fullOptions.type === Engine.TEXTURETYPE_FLOAT && !this._caps.textureFloatLinearFiltering) {
-            // if floating point linear (gl.FLOAT) then force to NEAREST_SAMPLINGMODE
-            fullOptions.samplingMode = Engine.TEXTURE_NEAREST_SAMPLINGMODE;
-        }
-        else if (fullOptions.type === Engine.TEXTURETYPE_HALF_FLOAT && !this._caps.textureHalfFloatLinearFiltering) {
-            // if floating point linear (HALF_FLOAT) then force to NEAREST_SAMPLINGMODE
-            fullOptions.samplingMode = Engine.TEXTURE_NEAREST_SAMPLINGMODE;
-        }
-        var gl = this._gl;
-
-        var texture = new InternalTexture(this, InternalTexture.DATASOURCE_RENDERTARGET);
-        this._bindTextureDirectly(gl.TEXTURE_CUBE_MAP, texture, true);
-
-        var filters = this._getSamplingParameters(fullOptions.samplingMode, fullOptions.generateMipMaps);
-
-        if (fullOptions.type === Engine.TEXTURETYPE_FLOAT && !this._caps.textureFloat) {
-            fullOptions.type = Engine.TEXTURETYPE_UNSIGNED_INT;
-            Logger.Warn("Float textures are not supported. Cube render target forced to TEXTURETYPE_UNESIGNED_BYTE type");
-        }
-
-        gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MAG_FILTER, filters.mag);
-        gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MIN_FILTER, filters.min);
-        gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-        gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-
-        for (var face = 0; face < 6; face++) {
-            gl.texImage2D((gl.TEXTURE_CUBE_MAP_POSITIVE_X + face), 0, this._getRGBABufferInternalSizedFormat(fullOptions.type, fullOptions.format), size, size, 0, this._getInternalFormat(fullOptions.format), this._getWebGLTextureType(fullOptions.type), null);
-        }
-
-        // Create the framebuffer
-        var framebuffer = gl.createFramebuffer();
-        this.bindUnboundFramebuffer(framebuffer);
-
-        texture._depthStencilBuffer = this._setupFramebufferDepthAttachments(fullOptions.generateStencilBuffer, fullOptions.generateDepthBuffer, size, size);
-
-        // MipMaps
-        if (fullOptions.generateMipMaps) {
-            gl.generateMipmap(gl.TEXTURE_CUBE_MAP);
-        }
-
-        // Unbind
-        this._bindTextureDirectly(gl.TEXTURE_CUBE_MAP, null);
-        gl.bindRenderbuffer(gl.RENDERBUFFER, null);
-        this.bindUnboundFramebuffer(null);
-
-        texture._framebuffer = framebuffer;
-        texture.width = size;
-        texture.height = size;
-        texture.isReady = true;
-        texture.isCube = true;
-        texture.samples = 1;
-        texture.generateMipMaps = fullOptions.generateMipMaps;
-        texture.samplingMode = fullOptions.samplingMode;
-        texture.type = fullOptions.type;
-        texture.format = fullOptions.format;
-        texture._generateDepthBuffer = fullOptions.generateDepthBuffer;
-        texture._generateStencilBuffer = fullOptions.generateStencilBuffer;
-
-        this._internalTexturesCache.push(texture);
-
-        return texture;
-    }
-
-    /**
-     * Creates a cube texture
-     * @param rootUrl defines the url where the files to load is located
-     * @param scene defines the current scene
-     * @param files defines the list of files to load (1 per face)
-     * @param noMipmap defines a boolean indicating that no mipmaps shall be generated (false by default)
-     * @param onLoad defines an optional callback raised when the texture is loaded
-     * @param onError defines an optional callback raised if there is an issue to load the texture
-     * @param format defines the format of the data
-     * @param forcedExtension defines the extension to use to pick the right loader
-     * @param createPolynomials if a polynomial sphere should be created for the cube texture
-     * @param lodScale defines the scale applied to environment texture. This manages the range of LOD level used for IBL according to the roughness
-     * @param lodOffset defines the offset applied to environment texture. This manages first LOD level used for IBL according to the roughness
-     * @param fallback defines texture to use while falling back when (compressed) texture file not found.
-     * @param excludeLoaders array of texture loaders that should be excluded when picking a loader for the texture (defualt: empty array)
-     * @returns the cube texture as an InternalTexture
-     */
-    public createCubeTexture(rootUrl: string, scene: Nullable<Scene>, files: Nullable<string[]>, noMipmap?: boolean, onLoad: Nullable<(data?: any) => void> = null, onError: Nullable<(message?: string, exception?: any) => void> = null, format?: number, forcedExtension: any = null, createPolynomials = false, lodScale: number = 0, lodOffset: number = 0, fallback: Nullable<InternalTexture> = null, excludeLoaders: Array<IInternalTextureLoader> = []): InternalTexture {
-        var gl = this._gl;
-
-        var texture = fallback ? fallback : new InternalTexture(this, InternalTexture.DATASOURCE_CUBE);
-        texture.isCube = true;
-        texture.url = rootUrl;
-        texture.generateMipMaps = !noMipmap;
-        texture._lodGenerationScale = lodScale;
-        texture._lodGenerationOffset = lodOffset;
-
-        if (!this._doNotHandleContextLost) {
-            texture._extension = forcedExtension;
-            texture._files = files;
-        }
-
-        var lastDot = rootUrl.lastIndexOf('.');
-        var extension = forcedExtension ? forcedExtension : (lastDot > -1 ? rootUrl.substring(lastDot).toLowerCase() : "");
-
-        let loader: Nullable<IInternalTextureLoader> = null;
-        for (let availableLoader of Engine._TextureLoaders) {
-            if (excludeLoaders.indexOf(availableLoader) === -1 && availableLoader.canLoad(extension, this._textureFormatInUse, fallback, false, false)) {
-                loader = availableLoader;
-                break;
-            }
-        }
-
-        let onInternalError = (request?: WebRequest, exception?: any) => {
-            if (loader) {
-                const fallbackUrl = loader.getFallbackTextureUrl(texture.url, this._textureFormatInUse);
-                Logger.Warn((loader.constructor as any).name + " failed when trying to load " + texture.url + ", falling back to the next supported loader");
-                if (fallbackUrl) {
-                    excludeLoaders.push(loader);
-                    this.createCubeTexture(fallbackUrl, scene, files, noMipmap, onLoad, onError, format, extension, createPolynomials, lodScale, lodOffset, texture, excludeLoaders);
-                    return;
-                }
-            }
-
-            if (onError && request) {
-                onError(request.status + " " + request.statusText, exception);
-            }
-        };
-
-        if (loader) {
-            rootUrl = loader.transformUrl(rootUrl, this._textureFormatInUse);
-
-            const onloaddata = (data: any) => {
-                this._bindTextureDirectly(gl.TEXTURE_CUBE_MAP, texture, true);
-                loader!.loadCubeData(data, texture, createPolynomials, onLoad, onError);
-            };
-            if (files && files.length === 6) {
-                if (loader.supportCascades) {
-                    this._cascadeLoadFiles(scene, onloaddata, files, onError);
-                }
-                else {
-                    if (onError) {
-                        onError("Textures type does not support cascades.");
-                    } else {
-                        Logger.Warn("Texture loader does not support cascades.");
-                    }
-                }
-            }
-            else {
-                this._loadFile(rootUrl, onloaddata, undefined, undefined, true, onInternalError);
-            }
-        }
-        else {
-            if (!files) {
-                throw new Error("Cannot load cubemap because files were not defined");
-            }
-
-            this._cascadeLoadImgs(scene, (imgs) => {
-                var width = this.needPOTTextures ? Tools.GetExponentOfTwo(imgs[0].width, this._caps.maxCubemapTextureSize) : imgs[0].width;
-                var height = width;
-
-                this._prepareWorkingCanvas();
-
-                if (!this._workingCanvas || !this._workingContext) {
-                    return;
-                }
-                this._workingCanvas.width = width;
-                this._workingCanvas.height = height;
-
-                var faces = [
-                    gl.TEXTURE_CUBE_MAP_POSITIVE_X, gl.TEXTURE_CUBE_MAP_POSITIVE_Y, gl.TEXTURE_CUBE_MAP_POSITIVE_Z,
-                    gl.TEXTURE_CUBE_MAP_NEGATIVE_X, gl.TEXTURE_CUBE_MAP_NEGATIVE_Y, gl.TEXTURE_CUBE_MAP_NEGATIVE_Z
-                ];
-
-                this._bindTextureDirectly(gl.TEXTURE_CUBE_MAP, texture, true);
-                this._unpackFlipY(false);
-
-                let internalFormat = format ? this._getInternalFormat(format) : this._gl.RGBA;
-                for (var index = 0; index < faces.length; index++) {
-                    if (imgs[index].width !== width || imgs[index].height !== height) {
-                        this._workingContext.drawImage(imgs[index], 0, 0, imgs[index].width, imgs[index].height, 0, 0, width, height);
-                        gl.texImage2D(faces[index], 0, internalFormat, internalFormat, gl.UNSIGNED_BYTE, this._workingCanvas);
-                    } else {
-                        gl.texImage2D(faces[index], 0, internalFormat, internalFormat, gl.UNSIGNED_BYTE, imgs[index]);
-                    }
-                }
-
-                if (!noMipmap) {
-                    gl.generateMipmap(gl.TEXTURE_CUBE_MAP);
-                }
-
-                this._setCubeMapTextureParams(!noMipmap);
-
-                texture.width = width;
-                texture.height = height;
-                texture.isReady = true;
-                if (format) {
-                    texture.format = format;
-                }
-
-                texture.onLoadedObservable.notifyObservers(texture);
-                texture.onLoadedObservable.clear();
-
-                if (onLoad) {
-                    onLoad();
-                }
-            }, files, onError);
-        }
-
-        this._internalTexturesCache.push(texture);
-
-        return texture;
-    }
-
-    /**
      * @hidden
      */
     public _setCubeMapTextureParams(loadMipmap: boolean): void {
@@ -5762,8 +5189,6 @@ export class Engine {
         gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
 
         this._bindTextureDirectly(gl.TEXTURE_CUBE_MAP, null);
-
-        //  this.resetTextureCache();
     }
 
     /**
@@ -5982,7 +5407,8 @@ export class Engine {
      * @param effect defines the effect to bind
      */
     public bindSamplers(effect: Effect): void {
-        this.setProgram(effect.getProgram());
+        let webGLPipelineContext = effect.getPipelineContext() as WebGLPipelineContext;
+        this.setProgram(webGLPipelineContext.program!);
         var samplers = effect.getSamplers();
         for (var index = 0; index < samplers.length; index++) {
             var uniform = effect.getUniform(samplers[index]);
@@ -6424,7 +5850,8 @@ export class Engine {
      */
     public releaseEffects() {
         for (var name in this._compiledEffects) {
-            this._deleteProgram(this._compiledEffects[name]._program);
+            let webGLPipelineContext = this._compiledEffects[name].getPipelineContext() as WebGLPipelineContext;
+            this._deletePipelineContext(webGLPipelineContext);
         }
 
         this._compiledEffects = {};
@@ -7104,34 +6531,6 @@ export class Engine {
                 reject(exception);
             });
         });
-    }
-
-    private _partialLoadFile(url: string, index: number, loadedFiles: (string | ArrayBuffer)[], onfinish: (files: (string | ArrayBuffer)[]) => void, onErrorCallBack: Nullable<(message?: string, exception?: any) => void> = null): void {
-        var onload = (data: string | ArrayBuffer) => {
-            loadedFiles[index] = data;
-            (<any>loadedFiles)._internalCount++;
-
-            if ((<any>loadedFiles)._internalCount === 6) {
-                onfinish(loadedFiles);
-            }
-        };
-
-        const onerror = (request?: WebRequest, exception?: any) => {
-            if (onErrorCallBack && request) {
-                onErrorCallBack(request.status + " " + request.statusText, exception);
-            }
-        };
-
-        this._loadFile(url, onload, undefined, undefined, true, onerror);
-    }
-
-    private _cascadeLoadFiles(scene: Nullable<Scene>, onfinish: (images: (string | ArrayBuffer)[]) => void, files: string[], onError: Nullable<(message?: string, exception?: any) => void> = null): void {
-        var loadedFiles: (string | ArrayBuffer)[] = [];
-        (<any>loadedFiles)._internalCount = 0;
-
-        for (let index = 0; index < 6; index++) {
-            this._partialLoadFile(files[index], index, loadedFiles, onfinish, onError);
-        }
     }
 
     // Statics

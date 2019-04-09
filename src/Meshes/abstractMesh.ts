@@ -270,6 +270,10 @@ export class AbstractMesh extends TransformNode implements IDisposable, ICullabl
 
     /** @hidden */
     public _isActive = false;
+
+    /** @hidden */
+    public _onlyForInstances = false;
+
     /** @hidden */
     public _renderingGroup: Nullable<RenderingGroup> = null;
 
@@ -1158,7 +1162,7 @@ export class AbstractMesh extends TransformNode implements IDisposable, ICullabl
 
         if (this.subMeshes) {
             for (var index = 0; index < this.subMeshes.length; index++) {
-                this.subMeshes[index].refreshBoundingInfo();
+                this.subMeshes[index].refreshBoundingInfo(data);
             }
         }
 
@@ -1171,6 +1175,7 @@ export class AbstractMesh extends TransformNode implements IDisposable, ICullabl
 
         if (data && applySkeleton && this.skeleton) {
             data = Tools.Slice(data);
+            this._generatePointsArray();
 
             var matricesIndicesData = this.getVerticesData(VertexBuffer.MatricesIndicesKind);
             var matricesWeightsData = this.getVerticesData(VertexBuffer.MatricesWeightsKind);
@@ -1211,6 +1216,10 @@ export class AbstractMesh extends TransformNode implements IDisposable, ICullabl
 
                     Vector3.TransformCoordinatesFromFloatsToRef(data[index], data[index + 1], data[index + 2], finalMatrix, tempVector);
                     tempVector.toArray(data, index);
+
+                    if (this._positions) {
+                        this._positions[index / 3].copyFrom(tempVector);
+                    }
                 }
             }
         }
